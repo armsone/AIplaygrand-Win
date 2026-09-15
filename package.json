@@ -1,7 +1,8 @@
 {
   "name": "aiplaygrand-win",
-  "version": "0.3.0",
-  "description": "A beginner-friendly team AI playground using the regular Claude and Gemini websites",
+  "version": "0.4.0",
+  "buildStamp": "202609160058",
+  "description": "A beginner-friendly team AI playground: manual official websites plus an automatic 3-stage CLI relay",
   "author": "AIplaygrand-Win",
   "main": "main.js",
   "scripts": {
@@ -16,11 +17,17 @@
   "build": {
     "appId": "org.aiplaygrand.win",
     "productName": "AIplaygrand-Win",
-    "files": ["main.js", "storage.js", "vault.js", "providers.js", "session-transfer.js", "cli-tools.js", "preload.js", "index.html", "renderer.js", "styles.css", "tools.css", "README.md"],
+    "icon": "assets/icon.png",
+    "files": ["main.js", "storage.js", "vault.js", "providers.js", "session-transfer.js", "cli-tools.js", "gemini-runtime.js", "relay.js", "relay-cli.js", "preload.js", "index.html", "renderer.js", "styles.css", "tools.css", "README.md"],
     "directories": { "output": "release" },
-    "extraFiles": [{ "from": "USB-시작하기.txt", "to": "USB-시작하기.txt" }],
-    "win": { "target": ["zip"], "artifactName": "AIplaygrand-Win-${version}-${arch}.${ext}" },
+    "win": {
+      "target": ["zip"], "icon": "assets/icon.png", "artifactName": "AIplaygrand-Win-${version}-${arch}.${ext}",
+      "extraFiles": [{ "from": "USB-시작하기.txt", "to": "USB-시작하기.txt" }, { "from": "시연-안내.md", "to": "시연-안내.md" }]
+    },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
-    "mac": { "target": ["zip"], "category": "public.app-category.productivity" }
+    "mac": {
+      "target": ["zip"], "icon": "assets/icon.png", "category": "public.app-category.productivity",
+      "signIgnore": ["\\.(pak|bin|dat|asar|icns)$", "Electron Framework\\.framework/(?:Versions/Current(?:/|$)|Resources(?:/|$)|Libraries(?:/|$)|Helpers(?:/|$)|Electron Framework$)"]
+    }
   }
 }

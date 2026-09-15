@@ -18,7 +18,20 @@ contextBridge.exposeInMainWorld('playground', {
   listProfiles: () => ipcRenderer.invoke('profiles:list'),
   addProfile: profile => ipcRenderer.invoke('profiles:add', profile),
   deleteProfile: id => ipcRenderer.invoke('profiles:delete', id),
+  setHandoffConsent: value => ipcRenderer.invoke('profiles:set-handoff-consent', value),
   openTask: task => ipcRenderer.invoke('task:open', task),
   exportNotes: notes => ipcRenderer.invoke('file:export', notes),
-  importNotes: () => ipcRenderer.invoke('file:import')
+  importNotes: () => ipcRenderer.invoke('file:import'),
+  relayState: () => ipcRenderer.invoke('relay:state'),
+  relayLoad: id => ipcRenderer.invoke('relay:load', id),
+  relayDelete: id => ipcRenderer.invoke('relay:delete', id),
+  relayStart: input => ipcRenderer.invoke('relay:start', input),
+  relayStop: () => ipcRenderer.invoke('relay:stop'),
+  onRelayEvent: callback => { ipcRenderer.on('relay:event', (_event, value) => callback(value)); },
+  chatState: () => ipcRenderer.invoke('chat:state'),
+  chatLoad: id => ipcRenderer.invoke('chat:load', id),
+  chatDelete: id => ipcRenderer.invoke('chat:delete', id),
+  chatStart: input => ipcRenderer.invoke('chat:start', input),
+  chatStop: () => ipcRenderer.invoke('chat:stop'),
+  onChatEvent: callback => { ipcRenderer.on('chat:event', (_event, value) => callback(value)); }
 });

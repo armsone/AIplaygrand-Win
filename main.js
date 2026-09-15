@@ -7,6 +7,7 @@ const providers = require('./providers');
 const { Vault } = require('./vault');
 const { restoreCookies } = require('./session-transfer');
 const { createCliManager } = require('./cli-tools');
+const { createRelay } = require('./relay');
 const { readJSON, writeJSON, validateTasks, validateNotebook } = require('./storage');
 
 const portableRoot = app.isPackaged
@@ -40,7 +41,7 @@ let exitRequested = false;
 const profilesPath = () => path.join(dataRoot, 'profiles.json');
 const notebookPath = path.join(dataRoot, 'notebook.json');
 const vault = new Vault(path.join(dataRoot, 'team.vault'));
-const cli = createCliManager(dataRoot, shell);
+const cli = createCliManager(dataRoot, shell, app.getPath('appData'));
 handle('cli:check', () => cli.check());
 handle('cli:help', (_event, id) => cli.help(id));
 handle('cli:install', (_event, id) => { vault.requireOpen(); return cli.install(id); });
@@ -51,6 +52,58 @@ handle('cli:launch', async (_event, { provider, prompt }) => {
   await cli.launch(provider);
   return true;
 });
+// Relay data lives in its own vault field; every write re-reads vault.data so notebook,
+// cookie and relay saves never overwrite each other (all saves are synchronous).
+// VAULT_CAPACITY mirrors the hard limit in vault.js so the relay can refuse to start before
+// a run could push the vault over it (it never deletes history to make room).
+const VAULT_CAPACITY = 25 * 1024 * 1024;
+const relay = createRelay({
+  dataRoot,
+  cli,
+  store: {
+    read: () => (vault.requireOpen(), vault.data.relay),
+    write: value => { vault.requireOpen(); vault.save({ ...vault.data, relay: value }); },
+    bytes: () => (vault.requireOpen(), Buffer.byteLength(JSON.stringify(vault.data))),
+    capacity: VAULT_CAPACITY
+  },
+  emit: event => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('relay:event', event); }
+});
+handle('relay:state', () => relay.state());
+handle('relay:load', (_event, id) => relay.load(id));
+handle('relay:delete', (_event, id) => { vault.requireOpen(); return relay.remove(id); });
+handle('relay:start', (_event, input) => {
+  vault.requireOpen();
+  if (exitRequested) throw new Error('앱을 닫는 중이라 새 릴레이를 시작할 수 없어요.');
+  if (chat.isActive()) throw new Error('CLI 대화가 이미 진행 중이에요. 먼저 대화를 중지하세요.');
+  return relay.start(input);
+});
+handle('relay:stop', () => relay.stop());
+
+const chat = createRelay({
+  dataRoot,
+  cli,
+  stageCount: 1,
+  workspaceDir: path.join(dataRoot, 'Chat', 'workspace'),
+  label: 'CLI 대화',
+  defaultStages: [{ provider: 'claude', role: '대화를 이어가는 친절한 학습 도우미. 텍스트로만 답하세요.' }],
+  store: {
+    read: () => (vault.requireOpen(), vault.data.cliChat),
+    write: value => { vault.requireOpen(); vault.save({ ...vault.data, cliChat: value }); },
+    bytes: () => (vault.requireOpen(), Buffer.byteLength(JSON.stringify(vault.data))),
+    capacity: VAULT_CAPACITY
+  },
+  emit: event => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('chat:event', event); }
+});
+handle('chat:state', () => chat.state());
+handle('chat:load', (_event, id) => chat.load(id));
+handle('chat:delete', (_event, id) => { vault.requireOpen(); return chat.remove(id); });
+handle('chat:start', (_event, input) => {
+  vault.requireOpen();
+  if (exitRequested) throw new Error('앱을 닫는 중이라 새 대화를 시작할 수 없어요.');
+  if (relay.isActive()) throw new Error('팀 릴레이가 이미 진행 중이에요. 먼저 릴레이를 중지하세요.');
+  return chat.start(input);
+});
+handle('chat:stop', () => chat.stop());
 const browserSessions = new Map();
 const sessionReady = new Map();
 const runId = crypto.randomUUID();
@@ -122,6 +175,9 @@ handle('vault:unlock', async (_event, password) => {
     await vault.unlock(password, initial);
     validateNotebook(vault.data.notebook);
     if (vault.data.profiles.some(p => !p || typeof p.id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(p.id) || typeof p.name !== 'string' || !Object.hasOwn(providers, p.provider))) throw new Error('팀원 목록을 읽지 못했습니다.');
+    // Runs left "running" by a crash or forced exit become interrupted; nothing restarts automatically.
+    try { relay.markInterrupted(); } catch (error) { mainWindow?.webContents.send('relay:event', { type: 'save-error', message: error.message }); }
+    try { chat.markInterrupted(); } catch (error) { mainWindow?.webContents.send('chat:event', { type: 'save-error', message: error.message }); }
     return true;
   } catch (error) { vault.lock(); throw error; }
   finally { password = ''; unlockBusy = false; }
@@ -184,8 +240,22 @@ handle('storage:save', (_event, value) => {
 });
 handle('storage:folder', () => shell.openPath(dataRoot));
 handle('storage:request-exit', () => requestExit());
-handle('storage:cancel-exit', () => { exitRequested = false; });
+handle('storage:cancel-exit', () => {
+  exitRequested = false;
+  relay.cancelShutdown();
+  chat.cancelShutdown();
+});
 handle('storage:finish-exit', async () => {
+  // Stop the owned CLI children first. If either cannot be settled, keep the app open with explanatory error;
+  // nothing is locked or marked finished.
+  try {
+    await Promise.all([relay.shutdown(), chat.shutdown()]);
+  } catch (error) {
+    exitRequested = false;
+    relay.cancelShutdown();
+    chat.cancelShutdown();
+    throw error;
+  }
   try {
     if (vault.key) {
       for (const window of BrowserWindow.getAllWindows()) if (window !== mainWindow) window.destroy();
@@ -201,6 +271,8 @@ handle('storage:finish-exit', async () => {
     app.quit();
   } catch {
     exitRequested = false;
+    relay.cancelShutdown();
+    chat.cancelShutdown();
     throw new Error('브라우저 저장을 마치지 못했어요. USB 연결을 확인하고 다시 종료하세요.');
   }
 });
@@ -209,7 +281,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-handle('profiles:list', () => readProfiles());
+// The listing normalises the optional opt-in to an explicit boolean for display only. Nothing is
+// written back here, so profiles that never opted in keep no field in the vault (absent = false).
+handle('profiles:list', () => readProfiles().map(profile => ({ ...profile, autoHandoffConsent: profile.autoHandoffConsent === true })));
 
 handle('profiles:add', (_event, input) => {
   const name = input?.name?.trim();
@@ -229,6 +303,22 @@ handle('profiles:delete', (_event, id) => {
   return true;
 });
 
+// Per-profile opt-in for the web handoff timer ("my turn: copy the question and open my web
+// window after 5 seconds"). Only an explicit boolean for a known profile is accepted; every other
+// profile and field is preserved and the whole list is written through the atomic vault save.
+// The flag never authorises sending a prompt or using CLI credentials.
+handle('profiles:set-handoff-consent', (_event, input) => {
+  const id = input?.id;
+  const consent = input?.consent;
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(id) || typeof consent !== 'boolean') throw new Error('자동 인계 설정 값을 확인해 주세요.');
+  const profiles = readProfiles();
+  const profile = profiles.find(item => item.id === id);
+  if (!profile) throw new Error('팀원 자리를 찾을 수 없습니다.');
+  profile.autoHandoffConsent = consent;
+  writeProfiles(profiles);
+  return { ...profile };
+});
+
 handle('task:open', async (_event, { profileId, prompt }) => {
   const profile = readProfiles().find(item => item.id === profileId);
   if (!profile) throw new Error('팀원 자리를 찾을 수 없습니다.');
@@ -244,6 +334,11 @@ handle('task:open', async (_event, { profileId, prompt }) => {
   const partition = `aiplaygrand-${runId}-${profile.id}`;
   if (!sessionReady.has(profile.id)) {
     const current = session.fromPartition(partition, { cache: false });
+    // Electron otherwise grants website permission requests by default. This text-learning
+    // browser does not grant camera, microphone, location, notifications or clipboard API access.
+    // Native keyboard copy/paste and explicit file selection remain under the user's control.
+    current.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    current.setPermissionCheckHandler(() => false);
     browserSessions.set(profile.id, current);
     sessionReady.set(profile.id, restoreCookies(current, vault.data.cookies[profile.id] || []).then(result => {
       current.cookies.on('changed', scheduleSessionSave);
