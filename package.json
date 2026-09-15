@@ -1,0 +1,26 @@
+{
+  "name": "aiplaygrand-win",
+  "version": "0.3.0",
+  "description": "A beginner-friendly team AI playground using the regular Claude and Gemini websites",
+  "author": "AIplaygrand-Win",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win zip --x64",
+    "dist:mac": "electron-builder --mac zip"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "org.aiplaygrand.win",
+    "productName": "AIplaygrand-Win",
+    "files": ["main.js", "storage.js", "vault.js", "providers.js", "session-transfer.js", "cli-tools.js", "preload.js", "index.html", "renderer.js", "styles.css", "tools.css", "README.md"],
+    "directories": { "output": "release" },
+    "extraFiles": [{ "from": "USB-시작하기.txt", "to": "USB-시작하기.txt" }],
+    "win": { "target": ["zip"], "artifactName": "AIplaygrand-Win-${version}-${arch}.${ext}" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
+    "mac": { "target": ["zip"], "category": "public.app-category.productivity" }
+  }
+}

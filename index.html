@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIplaygrand-Win</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="tools.css">
+</head>
+<body>
+  <header>
+    <div>
+      <div class="eyebrow"><span class="brand-mark">✦</span> 함께 만드는 작은 발견</div>
+      <h1>AIplaygrand-Win</h1>
+      <p>우리 팀의 배움, USB 하나에 담아 어디서든 이어가요.</p>
+    </div>
+    <div class="header-actions">
+      <button id="importBtn" class="secondary" disabled>기록 가져오기</button>
+      <button id="exportBtn" class="secondary" disabled>기록 내보내기</button>
+    </div>
+  </header>
+
+  <div class="portable-bar">
+    <div class="drive-icon" aria-hidden="true">▣</div>
+    <div class="drive-info"><strong id="storageMode">저장 폴더 확인 중</strong><span id="dataPath">실행 파일 옆 Data 폴더</span></div>
+    <span id="saveState" role="status" aria-live="polite">불러오는 중…</span>
+    <button id="openFolder" class="secondary">폴더 열기</button>
+    <button id="exitBtn" class="primary">저장하고 종료</button>
+  </div>
+  <div id="storageError" class="storage-error" role="alert" hidden><span id="errorMessage"></span><button id="retrySave" class="secondary">다시 시도</button></div>
+  <main id="workspace" inert>
+    <section class="panel resources-panel">
+      <div class="section-title"><div><span class="step">✓</span><h2>웹 · CLI 실행 준비</h2></div><button id="checkResources" class="secondary">다시 점검</button></div>
+      <p id="resourceSummary" class="hint">실행 환경을 확인합니다.</p>
+      <p class="hint">웹은 추가 CLI 설치 없이 열 수 있어요. CLI는 별도 터미널에서 실행하며 공식 계정 로그인이 필요합니다. Claude 무료 웹 계정에는 Claude Code 이용권이 포함되지 않습니다.</p>
+      <div id="resources" class="resource-grid"></div>
+      <p class="hint">CLI는 PC에서 로그인한 계정으로 열립니다. 웹 팀원 선택으로 CLI 계정이 바뀌지 않습니다. CLI 인증·설정은 웹 보관함에 포함되지 않습니다. CLI에서 만든 파일과 다운로드·내보내기는 별도 평문 파일입니다. USB를 빼기 전에 CLI 터미널도 종료하세요.</p>
+    </section>
+    <section class="overview" aria-label="팀 활동 현황">
+      <div><span class="eyebrow">OUR PLAYGROUND</span><h2>작은 질문에서 시작하는<br>우리 팀의 다음 아이디어.</h2><p>질문하기 → 함께 살펴보기 → 배운 점 남기기</p></div>
+      <div class="stats"><div><strong id="teamCount">0</strong><span>함께하는 팀원</span></div><div><strong id="missionCount">0</strong><span>우리 팀 미션</span></div><div><strong id="doneCount">0</strong><span>완성한 기록</span></div></div>
+    </section>
+    <section class="panel">
+      <div class="section-title">
+        <div><span class="step">01</span><h2>우리 팀</h2></div>
+        <button id="addProfile" class="secondary">＋ 팀원 추가</button>
+      </div>
+      <p class="hint">처음에는 Claude 2명, Gemini 1명으로 시작해요. 팀원 추가에서 Codex 웹도 선택할 수 있습니다. 로그인 여부는 열린 서비스 화면에서 확인하세요.</p>
+      <div id="profiles" class="profiles"></div>
+    </section>
+
+    <section class="panel compose">
+      <div class="section-title">
+        <div><span class="step">02</span><h2>새 미션</h2></div>
+      </div>
+      <label for="prompt">함께 풀어볼 질문이나 할 일</label>
+      <textarea id="prompt" maxlength="200000" placeholder="예: 처음 만드는 할 일 앱에 어떤 기능이 있으면 좋을까요? 초보자 세 명이 역할을 나눠 만들 수 있게 제안해 주세요."></textarea>
+      <div class="compose-footer">
+        <label class="select-label">이번 차례<select id="profileSelect"></select></label>
+        <label class="select-label">실행 방식<select id="executionMode"><option value="web">웹 브라우저</option><option value="cli">CLI 터미널</option></select></label>
+        <button id="queueBtn" class="primary">미션 추가</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title">
+        <div><span class="step">03</span><h2>실습 기록</h2></div>
+      </div>
+      <p class="hint">미션을 열면 질문이 복사돼요. 서비스 창에 직접 붙여 넣고 전송한 다음, 답과 배운 점을 여기에 기록하세요. 사용량 제한에 도달하면 해당 계정은 쉬었다가 나중에 다시 사용합니다.</p>
+      <p class="hint">질문과 답변은 실행 폴더에 자동 저장돼요. 내용을 다 정리하면 실습 기록 저장을 눌러 완료하세요.</p>
+      <div class="record-tools"><input id="search" type="search" placeholder="질문, 답변, 팀원 검색" aria-label="기록 검색"><select id="statusFilter" aria-label="미션 상태"><option value="all">모든 기록</option><option value="queued">시작 전</option><option value="opened">실습 중</option><option value="paused">잠시 쉬는 중</option><option value="done">기록 완료</option></select></div>
+      <div id="tasks" class="tasks"></div>
+    </section>
+    <details class="usage-guide"><summary>USB로 옮기는 방법과 시작 전 안내</summary><p>ZIP 전체를 USB에 풀고 실행하세요. 프로그램과 Data 폴더를 항상 함께 보관하세요. ‘저장하고 종료’로 앱을 닫은 뒤 Windows의 ‘하드웨어 안전하게 제거’를 사용하세요. 이 버튼은 USB 장치를 꺼내는 기능은 아닙니다.</p><p>팀원·질문·답변은 함께 이동합니다. 새 PC의 로그인은 다시 필요할 수 있어요. 팀 기록과 웹 쿠키는 보관함 비밀번호로 보호합니다. 다운로드·내보낸 기록·CLI 파일·이전 버전 원본은 암호화되지 않아요. 신뢰하는 PC에서 사용하고 별도 백업도 보관하세요.</p><p>Claude 개인 계정은 만 18세 이상용입니다. Gemini는 국가와 계정 종류에 따라 연령·보호자 승인 조건이 달라요. 개인정보는 질문에 넣지 말고, AI의 답은 함께 확인하세요.</p></details>
+  </main>
+
+  <dialog id="profileDialog">
+    <form id="profileForm">
+      <div class="section-title"><h2>팀원 추가</h2><button type="button" id="closeDialog" class="icon" aria-label="닫기">×</button></div>
+      <label>팀원 이름<input id="profileName" maxlength="120" required placeholder="예: 민지"></label>
+      <label>주로 사용할 서비스<select id="provider"><option value="claude">Claude</option><option value="gemini">Gemini</option><option value="codex">Codex 웹</option></select></label>
+      <p class="hint security-hint">서비스 비밀번호는 앱에 입력하거나 저장하지 않아요. 서비스 웹페이지에서 팀원이 직접 로그인합니다.</p>
+      <button class="primary" type="submit">팀원 추가하기</button>
+    </form>
+  </dialog>
+  <dialog id="vaultDialog" aria-labelledby="vaultTitle">
+    <form id="vaultForm">
+      <div class="eyebrow">USB · 암호화 보관함</div>
+      <h2 id="vaultTitle">보관함 잠금 해제</h2>
+      <p class="hint" id="vaultHint">마스터 비밀번호로 팀 기록과 세션 보관함을 열어 주세요.</p>
+      <label>보관함 비밀번호<input id="vaultPassword" type="password" minlength="12" maxlength="1024" autocomplete="off" required></label>
+      <label id="confirmLabel" hidden>비밀번호 확인<input id="vaultConfirm" type="password" minlength="12" maxlength="1024" autocomplete="off"></label>
+      <p class="hint" id="legacyWarning" hidden>이전 버전 기록을 암호화 보관함으로 복사합니다. 기존 JSON·Browser 폴더와 백업은 보존되며 자동으로 암호화되지 않습니다. 완전한 보호가 필요하면 새 USB 폴더에서 시작하세요. 이전 로그인은 다시 해주세요.</p>
+      <p class="hint">12자 이상으로 설정하세요. 비밀번호를 잊으면 복구할 수 없습니다. 세션 복원은 기기 인증·만료에 따라 실패할 수 있어요. Codex는 웹 버전이며 CLI 로그인을 옮기지 않습니다.</p>
+      <p id="vaultError" role="alert"></p>
+      <button id="vaultSubmit" type="submit" class="primary">잠금 해제</button>
+      <button id="vaultExit" type="button" class="secondary">종료</button>
+    </form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="providers.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
