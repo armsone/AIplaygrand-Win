@@ -14,9 +14,15 @@
       <div class="eyebrow"><span class="brand-mark">✦</span> 함께 만드는 작은 발견</div>
       <h1>AIplaygrand-Win</h1>
       <p>우리 팀의 배움, USB 하나에 담아 어디서든 이어가요.</p>
-      <p id="appBuildInfo" class="hint">버전 확인 중</p>
+      <div class="version-line">
+        <span id="appBuildInfo" class="hint">버전 확인 중</span>
+        <span id="updateStatus" class="hint update-status" role="status" aria-live="polite"></span>
+      </div>
+      <div id="updateResultNotice" class="hint update-status update-result" role="status" aria-live="polite" hidden></div>
     </div>
     <div class="header-actions">
+      <button id="checkUpdateBtn" class="secondary">업데이트 확인</button>
+      <button id="cancelUpdateBtn" class="secondary" hidden>업데이트 취소</button>
       <button id="importBtn" class="secondary" disabled>기록 가져오기</button>
       <button id="exportBtn" class="secondary" disabled>기록 내보내기</button>
     </div>
@@ -243,6 +249,12 @@
       <p id="vaultError" role="alert"></p>
       <button id="vaultSubmit" type="submit" class="primary">잠금 해제</button>
       <button id="vaultExit" type="button" class="secondary">종료</button>
+      <div class="vault-update">
+        <span id="vaultUpdateStatus" class="hint update-status" role="status" aria-live="polite"></span>
+        <button id="vaultUpdateBtn" type="button" class="secondary">업데이트 확인</button>
+        <button id="vaultCancelUpdateBtn" type="button" class="secondary" hidden>업데이트 취소</button>
+        <div id="vaultUpdateResultNotice" class="hint update-status update-result" role="status" aria-live="polite" hidden></div>
+      </div>
     </form>
   </dialog>
   <div id="toast" role="status" aria-live="polite"></div>

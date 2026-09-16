@@ -72,5 +72,13 @@ contextBridge.exposeInMainWorld('playground', {
   seatCredentialStatus: id => ipcRenderer.invoke('seat:credential-status', id),
   seatCredentialAction: (id, action) => ipcRenderer.invoke('seat:credential-action', typeof id === 'object' ? id : { id, action }),
   appInfo: () => ipcRenderer.invoke('app:info'),
-  setMainReady: () => ipcRenderer.invoke('main:ready')
+  setMainReady: () => ipcRenderer.invoke('main:ready'),
+  // 휴대용 자체 업데이트(Windows x64): 렌더러는 확인·동의 창·적용·취소만 요청하며 주소·경로를 넘기지 않는다.
+  checkUpdate: opts => ipcRenderer.invoke('updater:check', { startup: Boolean(opts && opts.startup) }),
+  offerUpdate: () => ipcRenderer.invoke('updater:offer'),
+  applyUpdate: () => ipcRenderer.invoke('updater:apply'),
+  cancelUpdate: () => ipcRenderer.invoke('updater:cancel'),
+  updateStatus: () => ipcRenderer.invoke('updater:status'),
+  startupUpdateResult: () => ipcRenderer.invoke('updater:startup-result'),
+  onUpdateProgress: callback => { ipcRenderer.on('updater:progress', (_event, value) => callback(value)); }
 });

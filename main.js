@@ -13,6 +13,7 @@ const { createAutoHandoff, hasAutoContinueConsent } = require('./auto-handoff');
 const { SEAT_PROVIDERS } = require('./cli-seats');
 const { readJSON, writeJSON, validateTasks, validateNotebook } = require('./storage');
 const { createCredentialTransfer } = require('./cli-credentials');
+const { PortableUpdater } = require('./portable-updater');
 
 const portableRoot = app.isPackaged
   ? (process.platform === 'darwin' ? path.resolve(app.getPath('exe'), '../../../..') : path.dirname(app.getPath('exe')))
@@ -32,6 +33,15 @@ try {
   app.setPath('crashDumps', path.join(dataRoot, 'Crashes'));
   app.setPath('downloads', path.join(dataRoot, 'Downloads'));
 } catch (error) { startupError = error; }
+
+// 휴대용 자체 업데이트: 콜백은 아래에서 정의되는 상태를 호출 시점에 읽는다(다운로드·준비 완료 뒤에만 호출됨).
+const updater = new PortableUpdater(portableRoot, {
+  getMainWindow: () => mainWindow,
+  canShowDialog: () => !quitting && !exitRequested && !finishingExit && !recoveryDialogOpen && !!mainWindow && !mainWindow.isDestroyed(),
+  isBusy: () => isBusyForUpdate(),
+  requestExit: () => requestExit(),
+  helperSourcePath: path.join(__dirname, 'scripts', 'apply-update.ps1')
+});
 
 let mainWindow;
 let mainLoaded = false;
@@ -88,6 +98,20 @@ function checkCredentialPreconditions() {
     throw new Error('팀 릴레이 자동 이어받기가 진행 중이라 자격 증명 작업을 진행할 수 없어요.');
   }
 }
+
+// 업데이트 적용(저장·종료·교체)을 자동으로 시작해도 되는지: 실행 중 작업, 미저장 결과, 자격 증명 확인 창,
+// 자동 이어받기 카운트다운이 하나라도 있으면 기다린다. 작업을 끊지 않는다.
+function isBusyForUpdate() {
+  try {
+    if (quitting || exitRequested || finishingExit || credentialActionBusy || recoveryDialogOpen || unlockBusy) return true;
+    if (isRendererGone()) return true;
+    if (relay.isActive() || chat.isActive() || webAuto.isActive()) return true;
+    if (relay.hasUnsaved() || chat.hasUnsaved() || webAuto.hasUnsaved()) return true;
+    if (isHandoffBusy(handoff) || isHandoffBusy(relayHandoff)) return true;
+    return false;
+  } catch { return true; }
+}
+
 let packageInfo = {};
 try { packageInfo = require('./package.json'); } catch {}
 handle('app:info', () => ({
@@ -96,6 +120,21 @@ handle('app:info', () => ({
   platform: process.platform,
   arch: process.arch
 }));
+
+// 자체 업데이트 IPC. 렌더러는 '확인·동의 창 열기·적용 요청·취소'만 요청할 수 있고 주소·경로·버전을 정하지 않는다.
+// 확인 뒤 새 버전이 있으면 메인 프로세스의 동의 창(기본값: 나중에)을 띄우고, 동의한 경우에만 다운로드·준비를 시작한다.
+handle('updater:check', async (_event, opts) => {
+  const startup = Boolean(opts && opts.startup);
+  const result = await updater.checkUpdate({ startup });
+  if (result.status !== 'available') return result;
+  const consent = await updater.offerUpdate();
+  return { ...result, status: consent.consented ? 'downloading' : 'deferred', consentGiven: consent.consented, message: consent.message };
+});
+handle('updater:offer', () => updater.offerUpdate());
+handle('updater:apply', () => updater.requestApply());
+handle('updater:cancel', () => updater.cancelUpdate());
+handle('updater:status', () => updater.getStatus());
+handle('updater:startup-result', () => updater.checkStartupResult());
 handle('main:ready', () => {
   vault.requireOpen();
   if (quitting || exitRequested) return false;
@@ -726,6 +765,7 @@ function createMainWindow() {
   mainWindow.on('close', event => {
     safeHandoffCancel();
     safeRelayHandoffCancel();
+    updater.abortActiveDownload();
     if (!quitting) { event.preventDefault(); requestExit(); }
   });
   mainWindow.on('unresponsive', () => {
@@ -861,6 +901,7 @@ handle('storage:cancel-exit', () => {
   exitRequested = false;
   relay.cancelShutdown();
   chat.cancelShutdown();
+  updater.cancelPendingApply('exit-cancelled');
 });
 handle('storage:finish-exit', async () => {
   finishingExit = true;
@@ -876,12 +917,14 @@ handle('storage:finish-exit', async () => {
     exitRequested = false;
     relay.cancelShutdown();
     chat.cancelShutdown();
+    updater.cancelPendingApply('save-failed');
     throw error;
   }
   if (webAuto.hasUnsaved() || chat.hasUnsaved() || relay.hasUnsaved()) {
     exitRequested = false;
     relay.cancelShutdown();
     chat.cancelShutdown();
+    updater.cancelPendingApply('save-failed');
     const unsavedList = [];
     if (webAuto.hasUnsaved()) unsavedList.push('웹 자동 전송');
     if (chat.hasUnsaved()) unsavedList.push('CLI 대화');
@@ -898,14 +941,27 @@ handle('storage:finish-exit', async () => {
       current.flushStorageData();
       await current.cookies.flushStore();
     }
+    // 업데이트 적용은 모든 저장·플러시가 끝난 이 시점에만 승인한다. 도우미가 준비되어 있지 않거나 끝났으면
+    // 승인하지 않고 앱을 계속 연 채 오류를 보여 준다(다음 일반 종료에서 자동 적용되지 않는다).
+    if (updater.isPendingApply()) {
+      try {
+        await updater.authorizeApply();
+      } catch (updateError) {
+        updater.cancelPendingApply('save-failed');
+        throw new Error(`업데이트를 적용하지 못해 앱을 닫지 않았어요. 기존 파일은 바뀌지 않았습니다. ${updateError?.message || updateError}`);
+      }
+    } else {
+      updater.cancelHelperOnQuit();
+    }
     vault.lock();
     quitting = true;
     app.quit();
-  } catch {
+  } catch (error) {
     exitRequested = false;
     relay.cancelShutdown();
     chat.cancelShutdown();
-    throw new Error('브라우저 저장을 마치지 못했어요. USB 연결을 확인하고 다시 종료하세요.');
+    updater.cancelPendingApply('save-failed');
+    throw (error && error.message && (error.message.includes('브라우저') || error.message.includes('업데이트')) ? error : new Error('브라우저 저장을 마치지 못했어요. USB 연결을 확인하고 다시 종료하세요.'));
   }
   } finally {
     finishingExit = false;

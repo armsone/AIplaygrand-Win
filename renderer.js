@@ -410,6 +410,7 @@ window.playground.onPrepareExit(async () => {
   $('exitBtn').disabled = true;
   $('importBtn').disabled = true;
   $('exportBtn').disabled = true;
+  setUpdateButtons(update.state === 'applying' ? '적용 중…' : '저장하고 종료 중…', true);
   try {
     if (loaded) await persistTasks();
     await window.playground.finishExit();
@@ -423,6 +424,8 @@ window.playground.onPrepareExit(async () => {
     relayRender();
     renderAuto();
     await window.playground.cancelExit();
+    // 종료가 취소되면 메인이 업데이트 상태를 다시 알려 주지만, 알림이 없더라도 버튼은 마지막 상태로 되돌린다.
+    renderUpdateState(update.state === 'applying' ? 'available' : update.state, '');
   }
 });
 
@@ -2353,7 +2356,353 @@ $('vaultForm').addEventListener('submit', async event => {
   } finally { $('vaultSubmit').disabled = false; }
 });
 window.playground.onVaultSaveError(() => reportSaveError(new Error('로그인 세션을 USB에 저장하지 못했어요. 연결과 공간을 확인하고 저장하고 종료를 다시 시도하세요.')));
+
+// ---------- 휴대용 자체 업데이트 (Windows x64) ----------
+// 상태와 문구는 메인 프로세스(updater:progress)가 정하고 화면은 그대로 비춘다. 헤더 버튼은 보관함 잠금 창이 열려 있으면
+// 눌리지 않으므로(모달) 잠금 창 안에도 같은 상태·버튼을 둔다. 모든 표시는 textContent 로만 한다.
+const update = { state: 'idle', version: null, supported: null, supportedReason: '' };
+const UPDATE_BUTTON_IDS = ['checkUpdateBtn', 'vaultUpdateBtn'];
+const UPDATE_CANCEL_BUTTON_IDS = ['cancelUpdateBtn', 'vaultCancelUpdateBtn'];
+const UPDATE_STATUS_IDS = ['updateStatus', 'vaultUpdateStatus'];
+const UPDATE_RESULT_IDS = ['updateResultNotice', 'vaultUpdateResultNotice'];
+const UPDATE_BUSY_STATES = ['checking', 'downloading', 'preparing', 'applying'];
+let updateSeq = 0;
+let startupCheckStarted = false;
+
+function setUpdateStatusText(text, statusClass = '') {
+  for (const id of UPDATE_STATUS_IDS) {
+    const el = $(id);
+    if (!el) continue;
+    el.textContent = text || '';
+    el.className = `hint update-status ${statusClass}`.trim();
+  }
+}
+
+function setUpdateResultNotice(text, isFailure = false) {
+  for (const id of UPDATE_RESULT_IDS) {
+    const el = $(id);
+    if (!el) continue;
+    if (!text) {
+      el.textContent = '';
+      el.hidden = true;
+      el.setAttribute('role', 'status');
+      el.className = 'hint update-status update-result';
+      continue;
+    }
+    el.textContent = text;
+    el.hidden = false;
+    el.setAttribute('role', isFailure ? 'alert' : 'status');
+    el.className = `hint update-status update-result ${isFailure ? 'error' : 'ready'}`.trim();
+  }
+}
+
+function setUpdateButtons(label, disabled, cancelVisible = false) {
+  for (const id of UPDATE_BUTTON_IDS) {
+    const button = $(id);
+    if (!button) continue;
+    button.textContent = label;
+    button.disabled = disabled;
+  }
+  for (const id of UPDATE_CANCEL_BUTTON_IDS) {
+    const cancel = $(id);
+    if (cancel) cancel.hidden = !cancelVisible;
+  }
+}
+
+function renderUpdateState(state, message, extra = {}) {
+  update.state = state;
+  if (extra.version) update.version = extra.version;
+  if (update.supported === false) {
+    setUpdateButtons('업데이트 확인', true);
+    const reasonText = message || update.supportedReason || '';
+    if (reasonText) setUpdateStatusText(reasonText);
+    return;
+  }
+  switch (state) {
+    case 'checking': setUpdateButtons('확인 중…', true); break;
+    case 'downloading': setUpdateButtons('다운로드 중…', true, true); break;
+    case 'preparing': setUpdateButtons('준비 중…', true, true); break;
+    case 'ready': setUpdateButtons('업데이트 적용', false, true); break;
+    case 'applying': setUpdateButtons('적용 중…', true); break;
+    case 'available': setUpdateButtons('지금 업데이트', false); break;
+    default: setUpdateButtons('업데이트 확인', false);
+  }
+  if (typeof message === 'string' && message) {
+    setUpdateStatusText(message, extra.error ? 'error' : (state === 'ready' ? 'ready' : ''));
+  }
+}
+
+function handleUpdateProgress(event) {
+  if (!event || typeof event.state !== 'string') return;
+  updateSeq++;
+  if (event.state === 'cancelled') {
+    setUpdateResultNotice('');
+  }
+  if (event.supported === false) {
+    update.supported = false;
+    if (event.reason) update.supportedReason = event.reason;
+    else if (event.message) update.supportedReason = event.message;
+  }
+  const previous = update.state;
+  renderUpdateState(event.state, event.message, { version: event.version, error: Boolean(event.error) });
+  if (event.error && previous !== event.state) showToast(event.message || event.error);
+  else if (event.state === 'ready' && previous !== 'ready') showToast(event.message || '새 버전 준비가 끝났어요.');
+}
+
+function applyAuthoritativeStatus(res, options = {}) {
+  if (!res || typeof res !== 'object') return;
+  if (res.status === 'skipped') return;
+
+  if (res.supported === false || res.status === 'unsupported' || update.supported === false) {
+    if (res.supported === false || res.status === 'unsupported') {
+      update.supported = false;
+      if (res.reason) update.supportedReason = res.reason;
+      else if (res.message) update.supportedReason = res.message;
+    }
+    const reason = res.reason || res.message || update.supportedReason || options.fallbackMessage || '';
+    renderUpdateState('idle', reason, { error: Boolean(res.error || options.fallbackError) });
+    return;
+  }
+
+  if (res.version) update.version = res.version;
+
+  const rawState = res.state || res.status || 'idle';
+  const isError = Boolean(res.error || options.fallbackError || rawState === 'error' || rawState === 'missing_digest');
+  const message = res.message || res.reason || (typeof res.error === 'string' ? res.error : '') || options.fallbackMessage || '';
+
+  if (rawState === 'up_to_date') {
+    renderUpdateState('idle', message);
+    return;
+  }
+  if (rawState === 'deferred') {
+    renderUpdateState('available', message, { version: res.version });
+    return;
+  }
+  if (rawState === 'cancelled') {
+    setUpdateResultNotice('');
+    renderUpdateState('idle', message || '업데이트를 취소했어요.');
+    return;
+  }
+
+  let state = rawState;
+  if (rawState === 'error' || rawState === 'missing_digest') {
+    state = update.state === 'available' ? 'available' : 'idle';
+  }
+
+  // Ensure appropriate ready only if truly ready
+  if (state === 'ready') {
+    if (res.ready === false || (isError && res.ready !== true)) {
+      state = update.state === 'available' ? 'available' : 'idle';
+    }
+  }
+
+  if (['idle', 'checking', 'downloading', 'preparing', 'ready', 'applying', 'available'].includes(state)) {
+    renderUpdateState(state, message, { version: res.version, error: isError });
+  } else {
+    renderUpdateState('idle', message, { version: res.version, error: isError });
+  }
+}
+
+async function resyncUpdateStatus(options = {}) {
+  if (typeof window.playground?.updateStatus !== 'function') {
+    return false;
+  }
+  try {
+    const seq = updateSeq;
+    const raw = await window.playground.updateStatus();
+    if (!raw || typeof raw !== 'object') return false;
+    if (seq !== updateSeq) return true;
+    applyAuthoritativeStatus({
+      ...raw,
+      supported: raw.platformSupport?.supported,
+      reason: raw.platformSupport?.reason,
+      message: raw.statusMessage,
+      error: raw.lastError,
+      version: raw.stagedUpdate?.version || raw.availableUpdate?.version,
+      ready: raw.state === 'ready' && Boolean(raw.stagedUpdate)
+    }, options);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function applyUpdateCheckResult(res) {
+  if (!res || res.status === 'skipped') return;
+  if (res.status === 'unsupported' || res.supported === false) {
+    update.supported = false;
+    if (res.reason) update.supportedReason = res.reason;
+    else if (res.message) update.supportedReason = res.message;
+    renderUpdateState('idle', res.reason || res.message || '');
+    return;
+  }
+  if (res.status === 'error' || res.status === 'missing_digest') {
+    renderUpdateState(update.state === 'available' ? 'available' : 'idle', res.message, { error: true });
+    return;
+  }
+  if (res.status === 'up_to_date') {
+    renderUpdateState('idle', res.message || '');
+    return;
+  }
+  if (res.status === 'deferred') {
+    renderUpdateState('available', res.message || '', { version: res.version });
+    return;
+  }
+  if (['downloading', 'preparing', 'ready', 'applying', 'available', 'checking'].includes(res.status)) {
+    const st = res.status;
+    if (st === 'ready' && res.ready === false) {
+      renderUpdateState('available', res.message || '', { version: res.version });
+      return;
+    }
+    renderUpdateState(st, res.message || '', { version: res.version });
+    return;
+  }
+  renderUpdateState('idle', res.message || '');
+}
+
+async function runStartupUpdateCheck() {
+  if (startupCheckStarted) return;
+  startupCheckStarted = true;
+  if (typeof window.playground.checkUpdate !== 'function') return;
+  const seq = updateSeq;
+  try {
+    const res = await window.playground.checkUpdate({ startup: true });
+    if (updateSeq === seq) {
+      applyUpdateCheckResult(res);
+    }
+  } catch (error) {
+    const synced = await resyncUpdateStatus({ fallbackError: error, fallbackMessage: error?.message || '업데이트 확인 실패' });
+    if (!synced && updateSeq === seq) {
+      renderUpdateState('idle', error?.message || '업데이트 확인 실패', { error: true });
+    }
+  }
+}
+
+async function showStartupUpdateResult() {
+  if (typeof window.playground.startupUpdateResult !== 'function') return;
+  const prev = await window.playground.startupUpdateResult().catch(() => null);
+  if (!prev || typeof prev.status !== 'string' || prev.status === 'none' || prev.status === 'cancelled') {
+    setUpdateResultNotice('');
+    return;
+  }
+  const label = prev.version ? `v${prev.version}` : '새 버전';
+  const where = prev.stageFolder ? `${prev.stageFolder}` : '.aiplaygrand-update 폴더';
+  const detail = prev.error ? ` (${prev.error})` : '';
+  if (prev.status === 'success') {
+    setUpdateResultNotice(`${label} 업데이트 적용 완료. 교체 전 파일은 ${where}\\backup 에 남아 있어요.`, false);
+    showToast(`${label} 업데이트를 적용했어요.`);
+  } else if (prev.status === 'rolled_back') {
+    const message = `지난 ${label} 업데이트가 실패해 이전 버전으로 되돌렸어요.${detail}`;
+    setUpdateResultNotice(message, true);
+    showToast(message);
+  } else if (prev.status === 'rollback_failed' || prev.status === 'mixed' || prev.status === 'interrupted') {
+    const message = `지난 ${label} 업데이트가 중단되어 프로그램 파일이 섞여 있을 수 있어요(상태: ${prev.status}).${detail} 앱을 닫고 ${where}\\update.log 와 backup 폴더를 확인하거나, 그 폴더의 apply-update.ps1 을 -Action Recover 로 실행해 복구하세요. Data·Tools 폴더는 건드리지 않았어요.`;
+    setUpdateResultNotice(message, true);
+    showToast('지난 업데이트 복구가 필요해요. 상단 안내를 확인하세요.');
+  } else if (prev.status === 'aborted' || prev.status === 'prepare_failed') {
+    const message = `지난 ${label} 업데이트는 시작하지 못했고 기존 파일은 그대로예요.${detail}`;
+    setUpdateResultNotice(message, true);
+    showToast(message);
+  } else {
+    setUpdateResultNotice('');
+  }
+}
+
+// 준비된 업데이트 적용: 화면에서 보이는 진행 중 작업·열린 창을 먼저 막고(메인도 다시 검사함), 명시적 확인 뒤
+// 평소의 '저장하고 종료' 절차를 요청한다. 작업을 중단시키지 않는다.
+async function applyPreparedUpdate() {
+  if (chat.isPreparing || chat.run?.status === 'running') return showToast('CLI 대화가 진행 중이에요. 대화를 마친 뒤 업데이트를 적용하세요.');
+  if (relay.run?.status === 'running') return showToast('팀 릴레이가 진행 중이에요. 릴레이를 마친 뒤 업데이트를 적용하세요.');
+  if (auto.run?.status === 'running') return showToast('웹 자동 전송이 진행 중이에요. 전송을 마친 뒤 업데이트를 적용하세요.');
+  if (chat.run?.saveFailed || relay.run?.saveFailed || auto.run?.saveFailed) return showToast('저장하지 못한 결과가 있어요. ‘저장 다시 시도’를 마친 뒤 업데이트를 적용하세요.');
+  const handoffActive = session => session && ['counting', 'paused', 'choosing', 'executing', 'waiting_save'].includes(session.status);
+  if (handoff.busy || handoff.opening || handoffActive(auto.session) || handoffActive(relayAuto.session)) return showToast('팀원 이어받기가 진행 중이에요. 마치거나 취소한 뒤 업데이트를 적용하세요.');
+  if ($('handoffDialog').open || $('loginPrefsDialog').open || $('profileDialog').open) return showToast('열려 있는 설정 창을 먼저 닫아 주세요.');
+  if (loaded && (revision !== savedRevision || Boolean(saveTimer) || !$('storageError').hidden)) return showToast('아직 저장되지 않은 기록이 있어요. 저장 상태가 ‘저장됨’이 된 뒤 다시 시도하세요.');
+  const label = update.version ? `v${update.version}` : '새 버전';
+  if (!confirm(`${label} 업데이트를 지금 적용할까요?\n\n평소의 ‘저장하고 종료’를 실행한 뒤 프로그램 파일만 교체하고 앱을 다시 시작해요. Data(보관함·로그인·기록)·Tools·사용자 파일은 그대로예요. 교체 전 원본은 백업 폴더에 남아요.\n앱이 다시 열릴 때까지 USB를 빼지 마세요.`)) return;
+  const seq = updateSeq;
+  try {
+    renderUpdateState('applying', '업데이트 적용을 위해 저장하고 종료해요…');
+    await window.playground.applyUpdate();
+  } catch (error) {
+    const errorMsg = error?.message || '업데이트 적용을 시작하지 못했어요.';
+    showToast(errorMsg);
+    const synced = await resyncUpdateStatus({ fallbackError: error, fallbackMessage: errorMsg });
+    if (!synced && updateSeq === seq) {
+      renderUpdateState('ready', errorMsg, { error: true });
+    }
+  }
+}
+
+async function cancelUpdateClick() {
+  if (!['downloading', 'preparing', 'ready'].includes(update.state)) return;
+  if (!confirm('업데이트 다운로드·준비를 취소할까요? 이미 받은 파일은 지워지고, 다시 하려면 새로 내려받아야 해요.')) return;
+  setUpdateResultNotice('');
+  const seq = updateSeq;
+  try {
+    await window.playground.cancelUpdate();
+    const synced = await resyncUpdateStatus();
+    if (!synced && updateSeq === seq) {
+      renderUpdateState('idle', '업데이트를 취소했어요.');
+    }
+  } catch (error) {
+    const errorMsg = error?.message || '취소하지 못했어요.';
+    showToast(errorMsg);
+    const synced = await resyncUpdateStatus({ fallbackError: error, fallbackMessage: errorMsg });
+    if (!synced && updateSeq === seq) {
+      renderUpdateState(update.state, errorMsg, { error: true });
+    }
+  }
+}
+
+async function handleUpdateButtonClick() {
+  if (update.supported === false || UPDATE_BUSY_STATES.includes(update.state)) return;
+  if (update.state === 'ready') return applyPreparedUpdate();
+  if (update.state === 'available') {
+    const seq = updateSeq;
+    try {
+      const res = await window.playground.offerUpdate();
+      const synced = await resyncUpdateStatus();
+      if (!synced && updateSeq === seq) {
+        if (res && res.consented) {
+          renderUpdateState('downloading', res.message || '다운로드 중…', { version: res.version });
+        } else {
+          renderUpdateState('available', res?.message || '', { version: res?.version });
+        }
+      }
+    } catch (error) {
+      showToast(error?.message || '업데이트 안내를 열지 못했어요.');
+      const synced = await resyncUpdateStatus({ fallbackError: error, fallbackMessage: error?.message });
+      if (!synced && updateSeq === seq) {
+        renderUpdateState('available', error?.message || '업데이트 안내를 열지 못했어요.', { error: true });
+      }
+    }
+    return;
+  }
+  renderUpdateState('checking', '새 버전을 확인하는 중…');
+  const seq = updateSeq;
+  try {
+    const res = await window.playground.checkUpdate({ startup: false });
+    if (updateSeq === seq) {
+      applyUpdateCheckResult(res);
+    }
+  } catch (err) {
+    const errorMsg = err?.message || '업데이트 확인 실패';
+    const synced = await resyncUpdateStatus({ fallbackError: err, fallbackMessage: errorMsg });
+    if (!synced && updateSeq === seq) {
+      renderUpdateState('idle', errorMsg, { error: true });
+    }
+  }
+}
+
 async function start() {
+  for (const id of UPDATE_BUTTON_IDS) $(id)?.addEventListener('click', handleUpdateButtonClick);
+  for (const id of UPDATE_CANCEL_BUTTON_IDS) $(id)?.addEventListener('click', cancelUpdateClick);
+  if (typeof window.playground.onUpdateProgress === 'function') window.playground.onUpdateProgress(handleUpdateProgress);
+  try { await showStartupUpdateResult(); } catch {}
+  runStartupUpdateCheck().catch(() => {});
+
   try {
     const info = await window.playground.appInfo?.().catch(() => null);
     const buildEl = $('appBuildInfo');
