@@ -4,7 +4,11 @@ const os = require('node:os');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const run = promisify(execFile);
-const { VERSION: GEMINI_VERSION, prepareGemini } = require('./gemini-runtime');
+const { VERSION: GEMINI_VERSION, prepareGemini, baseEnv } = require('./gemini-runtime');
+const { SEAT_PROVIDERS, seatEnvironment, interpretStatus } = require('./cli-seats');
+// Environment keys whose app-owned values are written into the macOS launcher script verbatim.
+// Everything else is re-expanded from the OS at execution so no process secrets are persisted.
+const SEAT_ENV_KEY = /^(GEMINI_CLI_[A-Z_]+|CLAUDE_CONFIG_DIR|CODEX_HOME)$/;
 const definitions = {
   node: { command: 'node', label: 'Node.js', help: 'https://nodejs.org/en/download' },
   npm: { command: 'npm', label: 'npm', help: 'https://nodejs.org/en/download' },
@@ -68,7 +72,7 @@ function createCliManager(dataRoot, shell, appData) {
       const envPath = [path.dirname(executable), locate('node') ? path.dirname(locate('node')) : '', process.env.PATH || ''].filter(Boolean).join(':');
       // Persist only app-owned paths, never the calling process's environment values (proxy
       // credentials, for example). Retained OS values are expanded by Terminal at execution.
-      const isolatedEnv = Object.keys(childEnv).filter(key => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)).map(key => key.startsWith('GEMINI_CLI_')
+      const isolatedEnv = Object.keys(childEnv).filter(key => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)).map(key => SEAT_ENV_KEY.test(key)
         ? shQuote(`${key}=${childEnv[key]}`) : `${key}="\${${key}-}"`).join(' ');
       const invocation = childEnv === process.env ? `${shQuote(executable)} ${args.map(shQuote).join(' ')}` : `/usr/bin/env -i ${isolatedEnv} ${shQuote(executable)} ${args.map(shQuote).join(' ')}`;
       fs.writeFileSync(script, `#!/bin/sh\nexport PATH=${shQuote(envPath)}\ncd ${shQuote(workingDirectory)} || exit 1\n${invocation}\nprintf '\\nReturn to AIplaygrand to check resources. Press Enter to close.\\n'\nread reply\n`, { mode: 0o700 });
@@ -111,11 +115,24 @@ function createCliManager(dataRoot, shell, appData) {
   }
   return {
     resolveSpawn,
-    async prepare(id) {
+    // seat: a validated persisted profile of kind 'cli' (cli-seats.js). With a seat every command
+    // (login, status, automatic run) gets the same sanitized per-seat environment.
+    async prepare(id, seat) {
       const resolved = resolveSpawn(id);
+      const nodeDir = locate('node') ? path.dirname(locate('node')) : '';
+      if (seat) {
+        if (seat.provider !== id) throw new Error('CLI 자리의 서비스가 요청과 달라요.');
+        if (id === 'gemini' && (await inspect(id)).status !== 'ready') throw new Error(`앱 내 Gemini 대화에는 CLI ${GEMINI_VERSION}이 필요해요. 실행 준비에서 Gemini 설치/복구 후 다시 점검하세요.`);
+        const { env, cwd } = seatEnvironment(appData, seat);
+        env.PATH = [nodeDir, env.PATH || ''].filter(Boolean).join(path.delimiter);
+        return { ...resolved, env, cwd, seat: true };
+      }
       if (id !== 'gemini') {
-        const node = locate('node');
-        return { ...resolved, env: { ...process.env, PATH: [node ? path.dirname(node) : '', process.env.PATH || ''].filter(Boolean).join(path.delimiter) } };
+        const env = baseEnv();
+        const envKey = SEAT_PROVIDERS[id]?.envKey;
+        if (envKey && process.env[envKey]?.trim()) env[envKey] = process.env[envKey];
+        env.PATH = [nodeDir, env.PATH || ''].filter(Boolean).join(path.delimiter);
+        return { ...resolved, env };
       }
       const info = await inspect(id);
       if (info.status !== 'ready') throw new Error(`앱 내 Gemini 대화에는 CLI ${GEMINI_VERSION}이 필요해요. 실행 준비에서 Gemini 설치/복구 후 다시 점검하세요.`);
@@ -146,6 +163,30 @@ function createCliManager(dataRoot, shell, appData) {
       if ((await inspect(id)).status !== 'ready') throw new Error('CLI 준비 상태를 확인하고 설치를 마쳐 주세요.');
       const prepared = await this.prepare(id);
       await terminal(prepared.file, prepared.prefix, prepared.cwd || path.join(dataRoot, 'Projects'), id === 'gemini' ? prepared.env : process.env);
+    },
+    // Opens the official login command of the seat's CLI in a terminal carrying the seat env.
+    // The user completes the login there; the app never sees or stores credentials.
+    async seatLogin(seat) {
+      const id = seat?.provider;
+      if (!Object.hasOwn(SEAT_PROVIDERS, id)) throw new Error('지원하지 않는 CLI 자리입니다.');
+      if ((await inspect(id)).status !== 'ready') throw new Error(`${SEAT_PROVIDERS[id].label} 준비 상태를 확인하고 설치를 마쳐 주세요.`);
+      const prepared = await this.prepare(id, seat);
+      await terminal(prepared.file, [...prepared.prefix, ...SEAT_PROVIDERS[id].loginArgs], prepared.cwd, prepared.env);
+    },
+    // Official status command only (no model request, no credential file read). Returns booleans.
+    async seatStatus(seat) {
+      const id = seat?.provider;
+      if (!Object.hasOwn(SEAT_PROVIDERS, id)) throw new Error('지원하지 않는 CLI 자리입니다.');
+      if ((await inspect(id)).status !== 'ready') return { state: 'cliMissing' };
+      const definition = SEAT_PROVIDERS[id];
+      if (!definition.statusArgs) return { state: 'unknown', code: 'no-status-command' };
+      const prepared = await this.prepare(id, seat);
+      return new Promise(resolve => {
+        execFile(prepared.file, [...prepared.prefix, ...definition.statusArgs], { cwd: prepared.cwd, env: prepared.env, timeout: 15000, maxBuffer: 256 * 1024, windowsHide: true }, (error, stdout) => {
+          const code = error ? (Number.isInteger(error.code) ? error.code : null) : 0;
+          resolve(interpretStatus(id, { error, code, stdout }));
+        });
+      });
     }
   };
 }

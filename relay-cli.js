@@ -31,7 +31,10 @@ const STDIN_NOTICE = 'The task, your role, and prior teammates\' outputs are pro
 // request is sent. Unknown flags make the CLI exit with a usage error, but verifying up front
 // gives the user a precise message instead of a generic failure and never falls back to a
 // weaker flag set.
-function buildCommand(provider, workspace) {
+// options.seat: the command runs for an isolated CLI seat (cli-seats.js). Codex then pins the
+// documented file credential store so exec reads the same auth.json the seat's login wrote.
+function buildCommand(provider, workspace, options = {}) {
+  const seatArgs = options.seat && provider === 'codex' ? ['-c', 'cli_auth_credentials_store="file"'] : [];
   switch (provider) {
     case 'claude':
       return {
@@ -68,7 +71,7 @@ function buildCommand(provider, workspace) {
         ],
         // `codex exec` in the installed version has no -a/--ask-for-approval; approval_policy is set
         // through the documented -c override instead. mcp_servers={} clears any project-level table.
-        args: ['exec', '--json', '--sandbox', 'read-only', '--ignore-user-config', '--ignore-rules', '-c', 'approval_policy="never"', '-c', 'mcp_servers={}', '--ephemeral', '--skip-git-repo-check', '--cd', workspace, '-'],
+        args: ['exec', '--json', '--sandbox', 'read-only', '--ignore-user-config', '--ignore-rules', '-c', 'approval_policy="never"', '-c', 'mcp_servers={}', ...seatArgs, '--ephemeral', '--skip-git-repo-check', '--cd', workspace, '-'],
         cwd: workspace
       };
     case 'gemini':
@@ -106,11 +109,59 @@ function hasToolUse(content) {
   return Array.isArray(content) && content.some(part => part && (part.type === 'tool_use' || part.type === 'server_tool_use'));
 }
 
+// Failure classification for the automatic handoff. Only structured, machine-readable fields of
+// the official CLI event schemas are consulted; assistant text, result prose, HTTP 429, generic
+// "too many requests"/rate-limit codes and network errors are never treated as exhaustion.
+//   claude : `rate_limit_event` (raw stream-json) with rate_limit_info.status === 'rejected' AND a
+//            known usage window (five_hour, seven_day, seven_day_opus, seven_day_sonnet). An
+//            overage rejection while the overall status is allowed is NOT exhaustion.
+//   gemini : pinned 0.59.0 emits {type:'result', status:'error', error:{type, message}} where
+//            error.type is the Error class name. Only the non-retryable TerminalQuotaError counts
+//            (provider quota block, not necessarily a daily limit); RetryableQuotaError is a
+//            temporary throttle and stays 'unknown'.
+//   codex  : official protocol UsageLimitReachedError emits prefix "You’ve hit your usage limit."
+//            in turn.failed.error.message (and type:error envelope). Matched only against that
+//            exact anchored prefix for generic account usage exhaustion. Per-model limits
+//            ("... for <model>"), spend caps, credits, and billing limits remain manual.
+//   unknown : everything else (the handoff is then offered manually, never started automatically)
+const CODES = Object.freeze({
+  gemini: { quota: ['terminalquotaerror'], auth: [] }
+});
+const CLAUDE_QUOTA_WINDOWS = Object.freeze(['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet']);
+function classify(provider, ...codes) {
+  const table = CODES[provider];
+  const code = codes.map(value => typeof value === 'string' ? value.toLowerCase() : '').find(Boolean) || '';
+  if (table && code) {
+    if (table.quota.includes(code)) return { kind: 'quota', code };
+    if (table.auth.includes(code)) return { kind: 'auth', code };
+  }
+  return { kind: 'unknown', code: code.slice(0, 40) };
+}
+// Claude Code rate_limit_event → confirmed usage exhaustion only for a rejected known window.
+function classifyClaudeRateLimit(info) {
+  if (!info || typeof info !== 'object') return null;
+  const status = typeof info.status === 'string' ? info.status.toLowerCase() : '';
+  const window = typeof info.rateLimitType === 'string' ? info.rateLimitType.toLowerCase() : '';
+  if (status === 'rejected' && CLAUDE_QUOTA_WINDOWS.includes(window)) return { kind: 'quota', code: `rate_limit:${window}` };
+  return null;
+}
+// Codex CLI turn.failed / type:error → confirmed generic account usage exhaustion only for exact prefix.
+const CODEX_USAGE_LIMIT_PREFIX = /^You[’']ve hit your usage limit\./;
+function classifyCodexMessage(rawMessage) {
+  if (typeof rawMessage !== 'string') return { kind: 'unknown', code: '' };
+  const trimmed = rawMessage.trim();
+  if (CODEX_USAGE_LIMIT_PREFIX.test(trimmed)) {
+    return { kind: 'quota', code: 'usage_limit_reached' };
+  }
+  return { kind: 'unknown', code: '' };
+}
+
 // Parsers return a list of normalized events per JSON line:
 //   { kind: 'text', text }        streamed assistant text (append)
 //   { kind: 'final', text }       authoritative full text (replaces streamed text if non-empty)
 //   { kind: 'done' }              provider reported successful completion
-//   { kind: 'error', message }    provider reported failure
+//   { kind: 'error', message, failure }  provider reported failure (failure: classify())
+//   { kind: 'hint', failure }     structured signal that a later error is confirmed exhaustion
 //   { kind: 'tool', name }        provider attempted a tool call (relay aborts)
 // Unknown or malformed lines yield [] and are never treated as completion.
 function createParser(provider) {
@@ -129,11 +180,19 @@ function createParser(provider) {
   function parseGemini(event) {
     if (event.type === 'message' && event.role === 'assistant' && typeof event.content === 'string') return [{ kind: 'text', text: event.content }];
     if (event.type === 'tool_use' || event.type === 'tool_result') return [{ kind: 'tool', name: safeMessage(event.tool_name || 'tool', 60) }];
-    if (event.type === 'result') return event.status === 'success' ? [{ kind: 'done' }] : [{ kind: 'error', message: 'Gemini가 작업을 완료하지 못했어요. 로그인·네트워크·이용 한도를 확인하세요.' }];
-    if (event.type === 'error' && event.severity !== 'warning') return [{ kind: 'error', message: 'Gemini가 오류를 보고했어요. 로그인·네트워크·이용 한도를 확인하세요.' }];
+    if (event.type === 'result') {
+      if (event.status === 'success') return [{ kind: 'done' }];
+      const failure = classify('gemini', event.error && event.error.type);
+      return [{ kind: 'error', message: failure.kind === 'quota' ? 'Gemini CLI가 사용량 한도 차단(TerminalQuotaError)을 보고했어요.' : 'Gemini가 작업을 완료하지 못했어요. 로그인·네트워크·이용 한도를 확인하세요.', failure }];
+    }
+    if (event.type === 'error' && event.severity !== 'warning') return [{ kind: 'error', message: 'Gemini가 오류를 보고했어요. 로그인·네트워크·이용 한도를 확인하세요.', failure: classify('gemini', event.error && event.error.type) }];
     return [];
   }
   function parseClaude(event) {
+    if (event.type === 'rate_limit_event') {
+      const failure = classifyClaudeRateLimit(event.rate_limit_info);
+      return failure ? [{ kind: 'hint', failure }] : [];
+    }
     if (event.type === 'stream_event') {
       const inner = event.event;
       if (inner && inner.type === 'content_block_delta' && inner.delta && inner.delta.type === 'text_delta' && typeof inner.delta.text === 'string') {
@@ -152,7 +211,7 @@ function createParser(provider) {
     }
     if (event.type === 'system' && event.subtype === 'permission_denied') return [{ kind: 'tool', name: 'permission_denied' }];
     if (event.type === 'result') {
-      if (event.is_error === true || event.subtype !== 'success') return [{ kind: 'error', message: `Claude Code가 결과를 오류로 보고했어요 (${safeMessage(String(event.subtype || 'error'), 40)}).` }];
+      if (event.is_error === true || event.subtype !== 'success') return [{ kind: 'error', message: `Claude Code가 결과를 오류로 보고했어요 (${safeMessage(String(event.subtype || 'error'), 40)}).`, failure: classify('claude') }];
       if (Array.isArray(event.permission_denials) && event.permission_denials.length) return [{ kind: 'tool', name: 'permission_denials' }];
       const out = [];
       if (typeof event.result === 'string' && event.result) out.push({ kind: 'final', text: event.result });
@@ -167,15 +226,36 @@ function createParser(provider) {
       if (!item || typeof item !== 'object') return [];
       if (item.type === 'agent_message') return event.type === 'item.completed' && typeof item.text === 'string' ? [{ kind: 'text', text: item.text, whole: true }] : [];
       if (item.type === 'reasoning') return [];
-      if (item.type === 'error') return [{ kind: 'error', message: `Codex CLI 오류: ${safeMessage(item.message) || '자세한 내용 없음'}` }];
+      if (item.type === 'error') return [{ kind: 'error', message: `Codex CLI 오류: ${safeMessage(item.message) || '자세한 내용 없음'} (한도 여부 자동 확인 불가)`, failure: classify('codex') }];
       return [{ kind: 'tool', name: safeMessage(String(item.type || 'tool'), 60) }];
     }
     if (event.type === 'turn.completed') return [{ kind: 'done' }];
-    if (event.type === 'turn.failed') return [{ kind: 'error', message: `Codex 작업이 실패했어요: ${safeMessage(event.error && event.error.message) || '자세한 내용 없음'}` }];
-    if (event.type === 'error') return [{ kind: 'error', message: `Codex CLI 오류: ${safeMessage(event.message) || '자세한 내용 없음'}` }];
+    if (event.type === 'turn.failed') {
+      const raw = event.error && event.error.message;
+      const failure = classifyCodexMessage(raw);
+      const message = failure.kind === 'quota'
+        ? 'Codex CLI가 계정 사용량 한도(UsageLimitReachedError)를 보고했어요.'
+        : `Codex 작업이 실패했어요: ${safeMessage(raw) || '자세한 내용 없음'} (한도 여부 자동 확인 불가)`;
+      return [{ kind: 'error', message, failure }];
+    }
+    if (event.type === 'error') {
+      const raw = event.message;
+      const failure = classifyCodexMessage(raw);
+      const message = failure.kind === 'quota'
+        ? 'Codex CLI가 계정 사용량 한도(UsageLimitReachedError)를 보고했어요.'
+        : `Codex CLI 오류: ${safeMessage(raw) || '자세한 내용 없음'} (한도 여부 자동 확인 불가)`;
+      return [{ kind: 'error', message, failure }];
+    }
     return [];
   }
   return parse;
 }
 
-module.exports = { PROVIDERS, buildCommand, createParser, safeMessage, STDIN_NOTICE };
+// Which providers can ever report a confirmed quota through structured events (for UI/README).
+const QUOTA_DETECTION = Object.freeze({
+  claude: 'rate_limit_event(status rejected, 5시간/7일 창)',
+  gemini: 'result.error.type = TerminalQuotaError',
+  codex: 'turn.failed.error.message prefix "You’ve hit your usage limit."'
+});
+
+module.exports = { PROVIDERS, buildCommand, createParser, safeMessage, classify, classifyClaudeRateLimit, classifyCodexMessage, QUOTA_DETECTION, STDIN_NOTICE };

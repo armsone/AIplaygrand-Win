@@ -1,4 +1,4 @@
-AIplaygrand-Win 0.4.0 · Apple Silicon Mac 미리보기
+AIplaygrand-Win 0.5.0 · Apple Silicon Mac 시작하기
 
 1. 디스크 이미지 안의 AIplaygrand-Win 폴더 전체를 내 Mac의 쓰기 가능한 위치로 복사하세요.
    예: 사용자 폴더/Applications/AIplaygrand-Win 또는 개인 문서 폴더의 전용 폴더.
@@ -9,4 +9,4 @@ AIplaygrand-Win 0.4.0 · Apple Silicon Mac 미리보기
 5. CLI의 설치 파일과 로그인은 운영체제마다 다릅니다. Windows용 도구를 Mac에서 그대로 실행할 수 없습니다.
 
 설치와 로그인 이후 사용법은 함께 들어 있는 시연-안내.md를 참고하세요.
-Windows 실기기 동작과 실제 서비스 응답의 전체 연결은 별도 확인이 필요한 미리보기입니다.
+Windows 실기기 동작, 물리 USB 이동, 로그인 복원 및 실제 계정 간 자동 인계는 아직 확인하지 않았습니다.
