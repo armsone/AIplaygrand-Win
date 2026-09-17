@@ -2742,6 +2742,19 @@ async function refreshResources() {
   finally { $('checkResources').disabled = false; }
 }
 $('checkResources').addEventListener('click', refreshResources);
+$('installMissingTools').addEventListener('click', async () => {
+  if (!confirm('없는 Claude·Gemini·Codex CLI를 USB의 Tools 폴더에 한 번에 설치할까요? Node.js와 npm이 먼저 설치되어 있어야 합니다.')) return;
+  const button = $('installMissingTools');
+  button.disabled = true;
+  $('resourceSummary').textContent = '필요한 CLI를 설치하고 있어요…';
+  try {
+    const result = await window.playground.installMissingTools();
+    const missing = result.tools.filter(tool => ['claude', 'gemini', 'codex'].includes(tool.id) && tool.status !== 'ready');
+    $('resourceSummary').textContent = missing.length ? '일부 CLI를 확인하지 못했어요. 아래 상태를 확인하세요.' : '필요한 CLI 설치와 확인이 끝났어요.';
+    await refreshResources();
+  } catch (error) { showToast(error.message); await refreshResources(); }
+  finally { button.disabled = false; }
+});
 $('resources').addEventListener('click', async event => {
   const { help, install, launchCli, chatProvider } = event.target.dataset;
   try {

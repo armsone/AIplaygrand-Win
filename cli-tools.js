@@ -80,6 +80,16 @@ function createCliManager(dataRoot, shell, appData) {
       if (error) throw new Error('터미널을 열지 못했어요. 공식 설치 안내를 확인하세요.');
     } else throw new Error('현재 런처는 Windows와 macOS를 지원합니다.');
   }
+  async function installPackages(packages) {
+    const npm = locate('npm');
+    if (!npm) throw new Error('npm을 찾지 못했어요. Node.js를 먼저 설치하세요.');
+    const args = ['install', '--prefix', toolRoot, '--no-audit', '--no-fund', ...packages];
+    if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(npm)) {
+      await run(powershell(), ['-NoProfile', '-EncodedCommand', encode(`& ${psQuote(npm)} ${args.map(psQuote).join(' ')}`)], { timeout: 10 * 60 * 1000, maxBuffer: 256 * 1024, windowsHide: true });
+    } else {
+      await run(npm, args, { timeout: 10 * 60 * 1000, maxBuffer: 256 * 1024, windowsHide: true });
+    }
+  }
   // Resolve a CLI for direct spawn without a shell. Windows npm shims (.cmd/.bat) are
   // replaced by node + the package's bin script so no cmd.exe quoting is involved.
   // Shim layouts handled:
@@ -157,6 +167,20 @@ function createCliManager(dataRoot, shell, appData) {
       if (node.status !== 'ready' || npm.status !== 'ready') throw new Error('먼저 Node.js 20 이상과 npm을 설치한 뒤 다시 점검하세요.');
       const packageSpec = definitions[id].package + (id === 'gemini' ? `@${GEMINI_VERSION}` : '');
       await terminal(locate('npm'), ['install', '--prefix', toolRoot, '--no-audit', '--no-fund', packageSpec], dataRoot);
+    },
+    async installMissing() {
+      const [node, npm, ...tools] = await Promise.all([
+        inspect('node'), inspect('npm'), ...['claude', 'gemini', 'codex'].map(inspect)
+      ]);
+      if (node.status !== 'ready' || npm.status !== 'ready') {
+        throw new Error('Node.js 20 이상과 npm이 먼저 필요해요. 공식 설치 안내에서 설치한 뒤 다시 점검하세요.');
+      }
+      const packages = tools.filter(tool => tool.status !== 'ready').map(tool => {
+        const spec = definitions[tool.id].package;
+        return tool.id === 'gemini' ? `${spec}@${GEMINI_VERSION}` : spec;
+      });
+      if (packages.length) await installPackages(packages);
+      return this.check();
     },
     async launch(id) {
       if (!Object.hasOwn(definitions, id) || !definitions[id].package) throw new Error('지원하지 않는 CLI입니다.');

@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('playground', {
   checkResources: () => ipcRenderer.invoke('cli:check'),
   toolHelp: id => ipcRenderer.invoke('cli:help', id),
   installTool: id => ipcRenderer.invoke('cli:install', id),
+  installMissingTools: () => ipcRenderer.invoke('cli:install-missing'),
   launchCli: value => ipcRenderer.invoke('cli:launch', value),
   vaultStatus: () => ipcRenderer.invoke('vault:status'),
   unlockVault: password => ipcRenderer.invoke('vault:unlock', password),

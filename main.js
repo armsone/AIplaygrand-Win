@@ -147,6 +147,7 @@ handle('main:ready', () => {
 handle('cli:check', () => cli.check());
 handle('cli:help', (_event, id) => cli.help(id));
 handle('cli:install', (_event, id) => { vault.requireOpen(); return cli.install(id); });
+handle('cli:install-missing', (_event) => { vault.requireOpen(); return cli.installMissing(); });
 handle('cli:launch', async (_event, { provider, prompt }) => {
   vault.requireOpen();
   if (isHandoffBusy(relayHandoff)) throw new Error('릴레이 자동 인계를 먼저 취소하거나 마쳐 주세요.');
