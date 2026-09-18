@@ -12,7 +12,7 @@ class Vault {
   requireOpen() { if (!this.key || !this.data) throw new Error('보관함 비밀번호를 먼저 입력하세요.'); }
   async unlock(password, initial) {
     if (this.key) throw new Error('이미 열린 보관함입니다.');
-    if (typeof password !== 'string' || password.length < 12 || password.length > 1024) throw new Error('보관함 비밀번호는 12자 이상으로 입력하세요.');
+    if (typeof password !== 'string') throw new Error('보관함 비밀번호 형식을 확인하세요.');
     let salt, envelope;
     const existing = this.exists();
     if (existing) {
